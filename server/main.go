@@ -32,8 +32,6 @@ var (
 )
 
 func validateArgs() {
-	log.Println("validateArgs()")
-
 	if *optionsEndpoint == "" {
 		flag.Usage()
 		os.Exit(1)
@@ -49,8 +47,6 @@ func validateArgs() {
 }
 
 func openPorts() {
-	log.Println("openPorts()")
-
 	context, err = zmq.NewContext()
 	utils.AssertError(err)
 
@@ -62,8 +58,6 @@ func openPorts() {
 }
 
 func closePorts() {
-	log.Println("closePorts()")
-
 	optionsPort.Close()
 	if inPort != nil {
 		inPort.Close()
