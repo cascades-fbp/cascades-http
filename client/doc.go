@@ -6,6 +6,7 @@ import (
 
 var registryEntry = &library.Entry{
 	Description: "Multi-purpose HTTP client component",
+	Elementary:  true,
 	Inports: []library.EntryPort{
 		library.EntryPort{
 			Name:        "URL",

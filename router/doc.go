@@ -3,9 +3,10 @@ package main
 import "github.com/cascades-fbp/cascades/library"
 
 var registryEntry = &library.Entry{
-	Description: `Matches a URI and method from incoming JSON requests from http/server and forwards it either 
+	Description: `Matches a URI and method from incoming JSON requests from http/server and forwards it either
 to matching or failing output ports. Each PATTERN[index] port is routed to the corresponding SUCCESS[index]
 or a single FAIL output port.`,
+	Elementary: true,
 	Inports: []library.EntryPort{
 		library.EntryPort{
 			Name:        "PATTERN",

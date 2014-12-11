@@ -10,15 +10,15 @@ import (
 	"os"
 	"strings"
 
-	zmq "github.com/alecthomas/gozmq"
 	httputils "github.com/cascades-fbp/cascades-http/utils"
 	"github.com/cascades-fbp/cascades/components/utils"
 	"github.com/cascades-fbp/cascades/runtime"
+	zmq "github.com/pebbe/zmq4"
 )
 
 var (
 	// Flags
-	patternEndpoint = flag.String("port.pattern", "", "Component's input port endpoint")
+	routesEndpoint  = flag.String("port.routes", "", "Component's input port endpoint")
 	requestEndpoint = flag.String("port.request", "", "Component's input port endpoint")
 	successEndpoint = flag.String("port.success", "", "Component's output port endpoint")
 	failEndpoint    = flag.String("port.fail", "", "Component's output port endpoint")
@@ -26,15 +26,13 @@ var (
 	debug           = flag.Bool("debug", false, "Enable debug mode")
 
 	// Internal
-	context                    *zmq.Context
-	requestPort, failPort      *zmq.Socket
-	patternPorts, successPorts []*zmq.Socket
-	pollItems                  zmq.PollItems
-	err                        error
+	routesPort, requestPort, failPort *zmq.Socket
+	successPorts                      map[string]*zmq.Socket
+	err                               error
 )
 
 func validateArgs() {
-	if *patternEndpoint == "" {
+	if *routesEndpoint == "" {
 		flag.Usage()
 		os.Exit(1)
 	}
@@ -50,47 +48,31 @@ func validateArgs() {
 		flag.Usage()
 		os.Exit(1)
 	}
-	patterns := strings.Split(*patternEndpoint, ",")
+
 	successes := strings.Split(*successEndpoint, ",")
-	if len(patterns) != len(successes) {
-		fmt.Println("ERROR: the length of PATTERN array port should be same as length of SUCCESS array port!")
+	if len(successes) == 0 {
+		fmt.Println("ERROR: invalid length of the SUCCESS array port!")
 		flag.Usage()
 		os.Exit(1)
 	}
 }
 
 func openPorts() {
-	context, err = zmq.NewContext()
+	requestPort, err = utils.CreateInputPort(*requestEndpoint)
 	utils.AssertError(err)
 
-	requestPort, err = utils.CreateInputPort(context, *requestEndpoint)
+	failPort, err = utils.CreateOutputPort(*failEndpoint)
 	utils.AssertError(err)
 
-	failPort, err = utils.CreateOutputPort(context, *failEndpoint)
-	utils.AssertError(err)
+	successes := strings.Split(*successEndpoint, ",")
+	successPorts = make(map[string]*zmq.Socket, len(successes))
 
-	// Create pattern/success ports
 	var port *zmq.Socket
 
-	pollItems = zmq.PollItems{}
-	patterns := strings.Split(*patternEndpoint, ",")
-	successes := strings.Split(*successEndpoint, ",")
-	patternPorts = []*zmq.Socket{}
-	successPorts = []*zmq.Socket{}
-
 	for i, endpoint := range patterns {
-		// Add pattern IN socket
-		port, err = utils.CreateInputPort(context, strings.TrimSpace(endpoint))
+		port, err = utils.CreateOutputPort(strings.TrimSpace(successes[i]))
 		utils.AssertError(err)
-		patternPorts = append(patternPorts, port)
-
-		// Add pattens to poll items
-		pollItems = append(pollItems, zmq.PollItem{Socket: port, Events: zmq.POLLIN})
-
-		// Add success OUT socket
-		port, err = utils.CreateOutputPort(context, strings.TrimSpace(successes[i]))
-		utils.AssertError(err)
-		successPorts = append(successPorts, port)
+		successPorts
 	}
 }
 
@@ -103,7 +85,7 @@ func closePorts() {
 	for _, p := range successPorts {
 		p.Close()
 	}
-	context.Close()
+	zmq.Term()
 }
 
 func main() {
@@ -127,15 +109,14 @@ func main() {
 	openPorts()
 	defer closePorts()
 
-	pollItems = append(pollItems, zmq.PollItem{Socket: requestPort, Events: zmq.POLLIN})
+	poller.Add(requestPort, zmq.POLLIN)
 
 	exitCh := utils.HandleInterruption()
-	err = runtime.SetupShutdownByDisconnect(context, requestPort, "http-router.in", exitCh)
+	err = runtime.SetupShutdownByDisconnect(requestPort, "http-router.in", exitCh)
 	utils.AssertError(err)
 
 	// Main loop
 	var (
-		port        *zmq.Socket
 		index       int = -1
 		outputIndex int = -1
 		params      url.Values
@@ -147,28 +128,22 @@ func main() {
 		// Poll sockets
 		log.Println("Polling sockets...")
 
-		_, err = zmq.Poll(pollItems, -1)
+		sockets, err := poller.Poll(-1)
 		if err != nil {
 			log.Println("Error polling ports:", err.Error())
 			os.Exit(1)
 		}
 
-		// Resolve socket index
-		for i, item := range pollItems {
-			if item.REvents&zmq.POLLIN != 0 {
-				index = i
-				break
+		for index, s := range sockets {
+			ip, err = s.Socket.RecvMessageBytes(0)
+			if err != nil {
+				log.Printf("Failed to receive data. Error: %s", err.Error())
+				continue
 			}
-		}
-
-		ip, err = pollItems[index].Socket.RecvMultipart(0)
-		if !runtime.IsValidIP(ip) {
-			log.Println("Received invalid IP")
-			continue
-		}
-		if err != nil {
-			log.Printf("Failed to receive data. Error: %s", err.Error())
-			continue
+			if !runtime.IsValidIP(ip) {
+				log.Println("Received invalid IP")
+				continue
+			}
 		}
 
 		// Pattern arrived

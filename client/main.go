@@ -5,9 +5,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	zmq "github.com/alecthomas/gozmq"
-	"github.com/cascades-fbp/cascades-http/utils"
-	"github.com/cascades-fbp/cascades/runtime"
 	"io/ioutil"
 	"log"
 	"net/http"
@@ -17,6 +14,11 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	httputils "github.com/cascades-fbp/cascades-http/utils"
+	"github.com/cascades-fbp/cascades/components/utils"
+	"github.com/cascades-fbp/cascades/runtime"
+	zmq "github.com/pebbe/zmq4"
 )
 
 var (
@@ -65,66 +67,53 @@ func main() {
 
 	var err error
 
-	context, _ := zmq.NewContext()
-	defer context.Close()
+	defer zmq.Term()
 
 	// Url socket
-	urlSock, err := context.NewSocket(zmq.PULL)
+	urlSock, err := utils.CreateInputPort(*urlEndpoint)
 	assertError(err)
 	defer urlSock.Close()
-	err = urlSock.Bind(*urlEndpoint)
-	assertError(err)
+
 	// Method socket
-	methodSock, err := context.NewSocket(zmq.PULL)
+	methodSock, err := utils.CreateInputPort(*methodEndpoint)
 	assertError(err)
 	defer methodSock.Close()
-	err = methodSock.Bind(*methodEndpoint)
-	assertError(err)
+
 	// Headers socket
 	var headersSock *zmq.Socket
 	if *headersEndpoint != "" {
-		headersSock, err = context.NewSocket(zmq.PULL)
+		headersSock, err = utils.CreateInputPort(*headersEndpoint)
 		assertError(err)
 		defer headersSock.Close()
-		err = headersSock.Bind(*headersEndpoint)
-		assertError(err)
 	}
 	// Data socket
 	var formSock *zmq.Socket
 	if *formEndpoint != "" {
-		formSock, err = context.NewSocket(zmq.PULL)
+		formSock, err = utils.CreateInputPort(*formEndpoint)
 		assertError(err)
 		defer formSock.Close()
-		err = formSock.Bind(*formEndpoint)
-		assertError(err)
 	}
 
 	// Response socket
 	var respSock *zmq.Socket
 	if *responseEndpoint != "" {
-		respSock, err = context.NewSocket(zmq.PUSH)
+		respSock, err = utils.CreateOutputPort(*responseEndpoint)
 		assertError(err)
 		defer respSock.Close()
-		err = respSock.Connect(*responseEndpoint)
-		assertError(err)
 	}
 	// Error socket
 	var errSock *zmq.Socket
 	if *errorEndpoint != "" {
-		errSock, err = context.NewSocket(zmq.PUSH)
+		errSock, err = utils.CreateOutputPort(*errorEndpoint)
 		assertError(err)
 		defer errSock.Close()
-		err = errSock.Connect(*errorEndpoint)
-		assertError(err)
 	}
 	// Response body socket
 	var bodySock *zmq.Socket
 	if *bodyEndpoint != "" {
-		bodySock, err = context.NewSocket(zmq.PUSH)
+		bodySock, err = utils.CreateOutputPort(*bodyEndpoint)
 		assertError(err)
 		defer bodySock.Close()
-		err = bodySock.Connect(*bodyEndpoint)
-		assertError(err)
 	}
 
 	// Ctrl+C handling
@@ -142,15 +131,14 @@ func main() {
 	//TODO: setup input ports monitoring to close sockets when upstreams are disconnected
 
 	// Setup socket poll items
-	pollItems := zmq.PollItems{
-		zmq.PollItem{Socket: urlSock, Events: zmq.POLLIN},
-		zmq.PollItem{Socket: methodSock, Events: zmq.POLLIN},
-	}
+	poller := zmq.NewPoller()
+	poller.Add(urlSock, zmq.POLLIN)
+	poller.Add(methodSock, zmq.POLLIN)
 	if headersSock != nil {
-		pollItems = append(pollItems, zmq.PollItem{Socket: headersSock, Events: zmq.POLLIN})
+		poller.Add(headersSock, zmq.POLLIN)
 	}
 	if formSock != nil {
-		pollItems = append(pollItems, zmq.PollItem{Socket: formSock, Events: zmq.POLLIN})
+		poller.Add(formSock, zmq.POLLIN)
 	}
 
 	// This is obviously dangerous but we need it to deal with our custom CA's
@@ -162,7 +150,6 @@ func main() {
 
 	// Main loop
 	var (
-		socket      *zmq.Socket = nil
 		ip          [][]byte
 		URL, method string
 		headers     map[string][]string
@@ -171,55 +158,50 @@ func main() {
 	)
 	log.Println("Started")
 	for {
-		_, err = zmq.Poll(pollItems, -1)
+		sockets, err := poller.Poll(-1)
 		if err != nil {
 			log.Println("Error polling ports:", err.Error())
 			continue
 		}
-		socket = nil
-		for _, item := range pollItems {
-			if item.REvents&zmq.POLLIN != 0 {
-				socket = item.Socket
-				break
-			}
-		}
-		if socket == nil {
-			log.Println("ERROR: could not find socket in polling items array")
-			continue
-		}
-		ip, err = socket.RecvMultipart(0)
-		if err != nil {
-			log.Println("Error receiving message:", err.Error())
-			continue
-		}
-		if !runtime.IsValidIP(ip) {
-			log.Println("Invalid IP:", ip)
-			continue
-		}
-		switch socket {
-		case urlSock:
-			URL = string(ip[1])
-			log.Println("URL specified:", URL)
-		case methodSock:
-			method = strings.ToUpper(string(ip[1]))
-			log.Println("Method specified:", method)
-		case headersSock:
-			err = json.Unmarshal(ip[1], &headers)
-			if err != nil {
-				log.Println("ERROR: failed to unmarchal headers:", err.Error())
+		for _, socket := range sockets {
+			if socket.Socket == nil {
+				log.Println("ERROR: could not find socket in polling items array")
 				continue
 			}
-			log.Println("Headers specified:", headers)
-		case formSock:
-			err = json.Unmarshal(ip[1], &data)
+			ip, err = socket.Socket.RecvMessageBytes(0)
 			if err != nil {
-				log.Println("ERROR: failed to unmarchal form data:", err.Error())
+				log.Println("Error receiving message:", err.Error())
 				continue
 			}
-			log.Println("Form specified:", data)
-		default:
-			log.Println("ERROR: IP from unhandled socket received!")
-			continue
+			if !runtime.IsValidIP(ip) {
+				log.Println("Invalid IP:", ip)
+				continue
+			}
+			switch socket.Socket {
+			case urlSock:
+				URL = string(ip[1])
+				log.Println("URL specified:", URL)
+			case methodSock:
+				method = strings.ToUpper(string(ip[1]))
+				log.Println("Method specified:", method)
+			case headersSock:
+				err = json.Unmarshal(ip[1], &headers)
+				if err != nil {
+					log.Println("ERROR: failed to unmarchal headers:", err.Error())
+					continue
+				}
+				log.Println("Headers specified:", headers)
+			case formSock:
+				err = json.Unmarshal(ip[1], &data)
+				if err != nil {
+					log.Println("ERROR: failed to unmarchal form data:", err.Error())
+					continue
+				}
+				log.Println("Form specified:", data)
+			default:
+				log.Println("ERROR: IP from unhandled socket received!")
+				continue
+			}
 		}
 
 		if method == "" || URL == "" || (headersSock != nil && headers == nil) || (formSock != nil && data == nil) {
@@ -240,7 +222,7 @@ func main() {
 		if err != nil {
 			log.Printf("ERROR performing HTTP %s %s: %s", request.Method, request.URL, err.Error())
 			if errSock != nil {
-				errSock.SendMultipart(runtime.NewPacket([]byte(err.Error())), zmq.NOBLOCK)
+				errSock.SendMessageDontwait(runtime.NewPacket([]byte(err.Error())))
 			}
 			method = ""
 			URL = ""
@@ -248,11 +230,11 @@ func main() {
 			data = nil
 			continue
 		}
-		resp, err := utils.Response2Response(response)
+		resp, err := httputils.Response2Response(response)
 		if err != nil {
 			log.Printf("ERROR converting response to reply: %s", err.Error())
 			if errSock != nil {
-				errSock.SendMultipart(runtime.NewPacket([]byte(err.Error())), zmq.NOBLOCK)
+				errSock.SendMessageDontwait(runtime.NewPacket([]byte(err.Error())))
 			}
 			method = ""
 			URL = ""
@@ -260,11 +242,11 @@ func main() {
 			data = nil
 			continue
 		}
-		ip, err = utils.Response2IP(resp)
+		ip, err = httputils.Response2IP(resp)
 		if err != nil {
 			log.Printf("ERROR converting reply to IP: %s", err.Error())
 			if errSock != nil {
-				errSock.SendMultipart(runtime.NewPacket([]byte(err.Error())), zmq.NOBLOCK)
+				errSock.SendMessageDontwait(runtime.NewPacket([]byte(err.Error())))
 			}
 			method = ""
 			URL = ""
@@ -274,10 +256,10 @@ func main() {
 		}
 
 		if respSock != nil {
-			respSock.SendMultipart(ip, 0)
+			respSock.SendMessage(ip)
 		}
 		if bodySock != nil {
-			bodySock.SendMultipart(runtime.NewPacket(resp.Body), 0)
+			bodySock.SendMessage(runtime.NewPacket(resp.Body))
 		}
 
 		method = ""

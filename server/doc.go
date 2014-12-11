@@ -4,6 +4,7 @@ import "github.com/cascades-fbp/cascades/library"
 
 var registryEntry = &library.Entry{
 	Description: "Create a HTTP server and binds to an address/port received from options",
+	Elementary:  true,
 	Inports: []library.EntryPort{
 		library.EntryPort{
 			Name:        "OPTIONS",
