@@ -8,9 +8,7 @@ import (
 	"io/ioutil"
 	"log"
 	"net/http"
-	"net/url"
 	"os"
-	"os/signal"
 	"strings"
 	"syscall"
 	"time"
@@ -22,22 +20,62 @@ import (
 )
 
 var (
-	urlEndpoint      = flag.String("port.url", "", "Component's input port endpoint")
-	methodEndpoint   = flag.String("port.method", "", "Component's input port endpoint")
-	headersEndpoint  = flag.String("port.headers", "", "Component's input port endpoint")
-	formEndpoint     = flag.String("port.form", "", "Component's input port endpoint")
+	// Flags
+	requestEndpoint  = flag.String("port.req", "", "Component's input port endpoint")
 	responseEndpoint = flag.String("port.resp", "", "Component's output port endpoint")
 	bodyEndpoint     = flag.String("port.body", "", "Component's output port endpoint")
 	errorEndpoint    = flag.String("port.err", "", "Component's error port endpoint")
 	jsonFlag         = flag.Bool("json", false, "Print component documentation in JSON")
 	debug            = flag.Bool("debug", false, "Enable debug mode")
+
+	// Internal
+	// Internal
+	reqPort, respPort, bodyPort, errPort *zmq.Socket
+	reqCh, respCh, bodyCh, errCh         chan bool
+	err                                  error
 )
 
-func assertError(err error) {
-	if err != nil {
-		fmt.Println("ERROR:", err.Error())
+func validateArgs() {
+	if *requestEndpoint == "" {
+		flag.Usage()
 		os.Exit(1)
 	}
+	if *responseEndpoint == "" && *bodyEndpoint == "" {
+		flag.Usage()
+		os.Exit(1)
+	}
+}
+
+func openPorts() {
+	reqPort, err = utils.CreateInputPort("http/client.req", *requestEndpoint, reqCh)
+	utils.AssertError(err)
+
+	if *responseEndpoint != "" {
+		respPort, err = utils.CreateOutputPort("http/client.resp", *responseEndpoint, respCh)
+		utils.AssertError(err)
+	}
+	if *bodyEndpoint != "" {
+		bodyPort, err = utils.CreateOutputPort("http/client.body", *bodyEndpoint, bodyCh)
+		utils.AssertError(err)
+	}
+	if *errorEndpoint != "" {
+		errPort, err = utils.CreateOutputPort("http/client.err", *errorEndpoint, errCh)
+		utils.AssertError(err)
+	}
+}
+
+func closePorts() {
+	reqPort.Close()
+	if bodyPort != nil {
+		bodyPort.Close()
+	}
+	if respPort != nil {
+		respPort.Close()
+	}
+	if errPort != nil {
+		errPort.Close()
+	}
+	zmq.Term()
 }
 
 func main() {
@@ -49,15 +87,6 @@ func main() {
 		os.Exit(0)
 	}
 
-	if *urlEndpoint == "" || *methodEndpoint == "" {
-		flag.Usage()
-		os.Exit(1)
-	}
-	if *responseEndpoint == "" && *bodyEndpoint == "" {
-		flag.Usage()
-		os.Exit(1)
-	}
-
 	log.SetFlags(0)
 	if *debug {
 		log.SetOutput(os.Stdout)
@@ -65,80 +94,76 @@ func main() {
 		log.SetOutput(ioutil.Discard)
 	}
 
-	var err error
+	validateArgs()
 
-	defer zmq.Term()
+	ch := utils.HandleInterruption()
+	reqCh = make(chan bool)
+	bodyCh = make(chan bool)
+	respCh = make(chan bool)
+	errCh = make(chan bool)
 
-	// Url socket
-	urlSock, err := utils.CreateInputPort(*urlEndpoint)
-	assertError(err)
-	defer urlSock.Close()
+	openPorts()
+	defer closePorts()
 
-	// Method socket
-	methodSock, err := utils.CreateInputPort(*methodEndpoint)
-	assertError(err)
-	defer methodSock.Close()
-
-	// Headers socket
-	var headersSock *zmq.Socket
-	if *headersEndpoint != "" {
-		headersSock, err = utils.CreateInputPort(*headersEndpoint)
-		assertError(err)
-		defer headersSock.Close()
+	ports := 1
+	if bodyPort != nil {
+		ports++
 	}
-	// Data socket
-	var formSock *zmq.Socket
-	if *formEndpoint != "" {
-		formSock, err = utils.CreateInputPort(*formEndpoint)
-		assertError(err)
-		defer formSock.Close()
+	if respPort != nil {
+		ports++
+	}
+	if errPort != nil {
+		ports++
 	}
 
-	// Response socket
-	var respSock *zmq.Socket
-	if *responseEndpoint != "" {
-		respSock, err = utils.CreateOutputPort(*responseEndpoint)
-		assertError(err)
-		defer respSock.Close()
-	}
-	// Error socket
-	var errSock *zmq.Socket
-	if *errorEndpoint != "" {
-		errSock, err = utils.CreateOutputPort(*errorEndpoint)
-		assertError(err)
-		defer errSock.Close()
-	}
-	// Response body socket
-	var bodySock *zmq.Socket
-	if *bodyEndpoint != "" {
-		bodySock, err = utils.CreateOutputPort(*bodyEndpoint)
-		assertError(err)
-		defer bodySock.Close()
-	}
-
-	// Ctrl+C handling
-	ch := make(chan os.Signal, 1)
-	signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
-	go func() {
-		for _ = range ch {
-			log.Println("Give 0MQ time to deliver before stopping...")
-			time.Sleep(1e9)
-			log.Println("Stopped")
-			os.Exit(0)
+	waitCh := make(chan bool)
+	reqExitCh := make(chan bool, 1)
+	go func(num int) {
+		total := 0
+		for {
+			select {
+			case v := <-reqCh:
+				if v {
+					total++
+				} else {
+					reqExitCh <- true
+				}
+			case v := <-bodyCh:
+				if !v {
+					log.Println("BODY port is closed. Interrupting execution")
+					ch <- syscall.SIGTERM
+				} else {
+					total++
+				}
+			case v := <-respCh:
+				if !v {
+					log.Println("RESP port is closed. Interrupting execution")
+					ch <- syscall.SIGTERM
+				} else {
+					total++
+				}
+			case v := <-errCh:
+				if !v {
+					log.Println("ERR port is closed. Interrupting execution")
+					ch <- syscall.SIGTERM
+				} else {
+					total++
+				}
+			}
+			if total >= num && waitCh != nil {
+				waitCh <- true
+			}
 		}
-	}()
+	}(ports)
 
-	//TODO: setup input ports monitoring to close sockets when upstreams are disconnected
-
-	// Setup socket poll items
-	poller := zmq.NewPoller()
-	poller.Add(urlSock, zmq.POLLIN)
-	poller.Add(methodSock, zmq.POLLIN)
-	if headersSock != nil {
-		poller.Add(headersSock, zmq.POLLIN)
-	}
-	if formSock != nil {
-		poller.Add(formSock, zmq.POLLIN)
+	log.Println("Waiting for port connections to establish... ")
+	select {
+	case <-waitCh:
+		log.Println("Ports connected")
+		waitCh = nil
+	case <-time.Tick(30 * time.Second):
+		log.Println("Timeout: port connections were not established within provided interval")
+		os.Exit(1)
 	}
 
 	// This is obviously dangerous but we need it to deal with our custom CA's
@@ -150,121 +175,102 @@ func main() {
 
 	// Main loop
 	var (
-		ip          [][]byte
-		URL, method string
-		headers     map[string][]string
-		data        url.Values
-		request     *http.Request
+		ip            [][]byte
+		clientOptions *httputils.HTTPClientOptions
+		request       *http.Request
 	)
+
 	log.Println("Started")
+
 	for {
-		sockets, err := poller.Poll(-1)
+		ip, err = reqPort.RecvMessageBytes(zmq.DONTWAIT)
 		if err != nil {
-			log.Println("Error polling ports:", err.Error())
-			continue
-		}
-		for _, socket := range sockets {
-			if socket.Socket == nil {
-				log.Println("ERROR: could not find socket in polling items array")
-				continue
-			}
-			ip, err = socket.Socket.RecvMessageBytes(0)
-			if err != nil {
-				log.Println("Error receiving message:", err.Error())
-				continue
-			}
-			if !runtime.IsValidIP(ip) {
-				log.Println("Invalid IP:", ip)
-				continue
-			}
-			switch socket.Socket {
-			case urlSock:
-				URL = string(ip[1])
-				log.Println("URL specified:", URL)
-			case methodSock:
-				method = strings.ToUpper(string(ip[1]))
-				log.Println("Method specified:", method)
-			case headersSock:
-				err = json.Unmarshal(ip[1], &headers)
-				if err != nil {
-					log.Println("ERROR: failed to unmarchal headers:", err.Error())
-					continue
-				}
-				log.Println("Headers specified:", headers)
-			case formSock:
-				err = json.Unmarshal(ip[1], &data)
-				if err != nil {
-					log.Println("ERROR: failed to unmarchal form data:", err.Error())
-					continue
-				}
-				log.Println("Form specified:", data)
+			select {
+			case <-reqExitCh:
+				log.Println("REQ port is closed. Interrupting execution")
+				ch <- syscall.SIGTERM
+				break
 			default:
-				log.Println("ERROR: IP from unhandled socket received!")
-				continue
+				// IN port is still open
 			}
+			time.Sleep(2 * time.Second)
+			continue
 		}
-
-		if method == "" || URL == "" || (headersSock != nil && headers == nil) || (formSock != nil && data == nil) {
+		if !runtime.IsValidIP(ip) {
+			log.Println("Invalid IP:", ip)
 			continue
 		}
 
-		if data != nil {
-			request, err = http.NewRequest(method, URL, strings.NewReader(data.Encode()))
-		} else {
-			request, err = http.NewRequest(method, URL, nil)
+		err = json.Unmarshal(ip[1], &clientOptions)
+		if err != nil {
+			log.Println("ERROR: failed to unmarshal request options:", err.Error())
+			continue
 		}
-		assertError(err)
-		for k, v := range headers {
+		if clientOptions == nil {
+			log.Println("ERROR: received nil request options")
+			continue
+		}
+
+		if clientOptions.Form != nil {
+			request, err = http.NewRequest(clientOptions.Method, clientOptions.URL, strings.NewReader(clientOptions.Form.Encode()))
+		} else {
+			request, err = http.NewRequest(clientOptions.Method, clientOptions.URL, nil)
+		}
+		utils.AssertError(err)
+
+		if clientOptions.ContentType != "" {
+			request.Header.Add("Content-Type", clientOptions.ContentType)
+		}
+
+		for k, v := range clientOptions.Headers {
 			request.Header.Add(k, v[0])
 		}
 
 		response, err := client.Do(request)
 		if err != nil {
 			log.Printf("ERROR performing HTTP %s %s: %s", request.Method, request.URL, err.Error())
-			if errSock != nil {
-				errSock.SendMessageDontwait(runtime.NewPacket([]byte(err.Error())))
+			if errPort != nil {
+				errPort.SendMessageDontwait(runtime.NewPacket([]byte(err.Error())))
 			}
-			method = ""
-			URL = ""
-			headers = nil
-			data = nil
+			clientOptions = nil
 			continue
 		}
 		resp, err := httputils.Response2Response(response)
 		if err != nil {
 			log.Printf("ERROR converting response to reply: %s", err.Error())
-			if errSock != nil {
-				errSock.SendMessageDontwait(runtime.NewPacket([]byte(err.Error())))
+			if errPort != nil {
+				errPort.SendMessageDontwait(runtime.NewPacket([]byte(err.Error())))
 			}
-			method = ""
-			URL = ""
-			headers = nil
-			data = nil
+			clientOptions = nil
 			continue
 		}
 		ip, err = httputils.Response2IP(resp)
 		if err != nil {
 			log.Printf("ERROR converting reply to IP: %s", err.Error())
-			if errSock != nil {
-				errSock.SendMessageDontwait(runtime.NewPacket([]byte(err.Error())))
+			if errPort != nil {
+				errPort.SendMessageDontwait(runtime.NewPacket([]byte(err.Error())))
 			}
-			method = ""
-			URL = ""
-			headers = nil
-			data = nil
+			clientOptions = nil
 			continue
 		}
 
-		if respSock != nil {
-			respSock.SendMessage(ip)
+		if respPort != nil {
+			respPort.SendMessage(ip)
 		}
-		if bodySock != nil {
-			bodySock.SendMessage(runtime.NewPacket(resp.Body))
+		if bodyPort != nil {
+			bodyPort.SendMessage(runtime.NewPacket(resp.Body))
 		}
 
-		method = ""
-		URL = ""
-		headers = nil
-		data = nil
+		select {
+		case <-reqCh:
+			log.Println("REQ port is closed. Interrupting execution")
+			ch <- syscall.SIGTERM
+			break
+		default:
+			// file port is still open
+		}
+
+		clientOptions = nil
+		continue
 	}
 }

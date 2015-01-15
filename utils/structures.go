@@ -2,16 +2,27 @@ package utils
 
 import (
 	"encoding/json"
-	"github.com/cascades-fbp/cascades/runtime"
 	"io/ioutil"
 	"net/http"
+	"net/url"
+
+	"github.com/cascades-fbp/cascades/runtime"
 )
 
+// HTTPClientOptions describe options IP for client configuration
+type HTTPClientOptions struct {
+	URL         string              `json:"url"`
+	Method      string              `json:"method"`
+	ContentType string              `json:"content-type"`
+	Headers     map[string][]string `json:"headers"`
+	Form        url.Values          `json:"form"`
+}
+
 //
-// Request data structure for IP
+// HTTPRequest data structure for IP
 //
 type HTTPRequest struct {
-	Id     string              `json:"id"`      // Assigned by server component
+	ID     string              `json:"id"`      // Assigned by server component
 	Method string              `json:"method"`  // GET/POST/PUT/etc
 	URI    string              `json:"uri"`     // Full URL that hit the server
 	Header map[string][]string `json:"headers"` // Map of headers
@@ -19,16 +30,16 @@ type HTTPRequest struct {
 }
 
 //
-// Response data structure for IP
+// HTTPResponse data structure for IP
 //
 type HTTPResponse struct {
-	Id         string              `json:"id"`      // Retrieved from request structure
+	ID         string              `json:"id"`      // Retrieved from request structure
 	StatusCode int                 `json:"status"`  // Response HTTP status code
 	Header     map[string][]string `json:"headers"` // Map of headers
 	Body       []byte              `json:"body"`    // Body of the response
 }
 
-// Create our internal request structure based on the standard one
+// Request2Request create our internal request structure based on the standard one
 func Request2Request(request *http.Request) *HTTPRequest {
 	// Parse GET/POST/PUT params into request.Form
 	request.ParseForm()
@@ -42,7 +53,7 @@ func Request2Request(request *http.Request) *HTTPRequest {
 	return res
 }
 
-// Create our internal response structure based on the standard one
+// Response2Response create our internal response structure based on the standard one
 func Response2Response(response *http.Response) (*HTTPResponse, error) {
 	defer response.Body.Close()
 	body, err := ioutil.ReadAll(response.Body)
@@ -57,7 +68,7 @@ func Response2Response(response *http.Response) (*HTTPResponse, error) {
 	return rep, nil
 }
 
-// Converts a given request to IP
+// Request2IP converts a given request to IP
 func Request2IP(request *HTTPRequest) ([][]byte, error) {
 	payload, err := json.Marshal(request)
 	if err != nil {
@@ -66,7 +77,7 @@ func Request2IP(request *HTTPRequest) ([][]byte, error) {
 	return runtime.NewPacket(payload), nil
 }
 
-// Converts a given response to IP
+// Response2IP сonverts a given response to IP
 func Response2IP(response *HTTPResponse) ([][]byte, error) {
 	payload, err := json.Marshal(response)
 	if err != nil {
@@ -75,7 +86,7 @@ func Response2IP(response *HTTPResponse) ([][]byte, error) {
 	return runtime.NewPacket(payload), nil
 }
 
-// Converts a given IP to request structure
+// IP2Request сonverts a given IP to request structure
 func IP2Request(ip [][]byte) (*HTTPRequest, error) {
 	var req *HTTPRequest
 	err := json.Unmarshal(ip[1], &req)
@@ -85,7 +96,7 @@ func IP2Request(ip [][]byte) (*HTTPRequest, error) {
 	return req, nil
 }
 
-// Converts a given IP to response structure
+// IP2Response сonverts a given IP to response structure
 func IP2Response(ip [][]byte) (*HTTPResponse, error) {
 	var res *HTTPResponse
 	err := json.Unmarshal(ip[1], &res)

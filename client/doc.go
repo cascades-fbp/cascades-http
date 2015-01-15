@@ -9,28 +9,10 @@ var registryEntry = &library.Entry{
 	Elementary:  true,
 	Inports: []library.EntryPort{
 		library.EntryPort{
-			Name:        "URL",
-			Type:        "string",
-			Description: "URL",
-			Required:    true,
-		},
-		library.EntryPort{
-			Name:        "METHOD",
-			Type:        "string",
-			Description: "HTTP method",
-			Required:    true,
-		},
-		library.EntryPort{
-			Name:        "HEADERS",
+			Name:        "REQ",
 			Type:        "json",
-			Description: "Headers to be added to request",
-			Required:    false,
-		},
-		library.EntryPort{
-			Name:        "FORM",
-			Type:        "json",
-			Description: "Form data to be posted",
-			Required:    false,
+			Description: "JSON object describing the HTTP request",
+			Required:    true,
 		},
 	},
 	Outports: []library.EntryPort{
