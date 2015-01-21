@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
 	"syscall"
 	"time"
@@ -32,51 +33,9 @@ var (
 	// Internal
 	reqPort, respPort, bodyPort, errPort *zmq.Socket
 	reqCh, respCh, bodyCh, errCh         chan bool
+	exitCh                               chan os.Signal
 	err                                  error
 )
-
-func validateArgs() {
-	if *requestEndpoint == "" {
-		flag.Usage()
-		os.Exit(1)
-	}
-	if *responseEndpoint == "" && *bodyEndpoint == "" {
-		flag.Usage()
-		os.Exit(1)
-	}
-}
-
-func openPorts() {
-	reqPort, err = utils.CreateInputPort("http/client.req", *requestEndpoint, reqCh)
-	utils.AssertError(err)
-
-	if *responseEndpoint != "" {
-		respPort, err = utils.CreateOutputPort("http/client.resp", *responseEndpoint, respCh)
-		utils.AssertError(err)
-	}
-	if *bodyEndpoint != "" {
-		bodyPort, err = utils.CreateOutputPort("http/client.body", *bodyEndpoint, bodyCh)
-		utils.AssertError(err)
-	}
-	if *errorEndpoint != "" {
-		errPort, err = utils.CreateOutputPort("http/client.err", *errorEndpoint, errCh)
-		utils.AssertError(err)
-	}
-}
-
-func closePorts() {
-	reqPort.Close()
-	if bodyPort != nil {
-		bodyPort.Close()
-	}
-	if respPort != nil {
-		respPort.Close()
-	}
-	if errPort != nil {
-		errPort.Close()
-	}
-	zmq.Term()
-}
 
 func main() {
 	flag.Parse()
@@ -96,12 +55,25 @@ func main() {
 
 	validateArgs()
 
-	ch := utils.HandleInterruption()
+	// Communication channels
 	reqCh = make(chan bool)
 	bodyCh = make(chan bool)
 	respCh = make(chan bool)
 	errCh = make(chan bool)
+	exitCh = make(chan os.Signal, 1)
 
+	// Start the communication & processing logic
+	go mainLoop()
+
+	// Wait for the end...
+	signal.Notify(exitCh, os.Interrupt, syscall.SIGTERM)
+	<-exitCh
+
+	log.Println("Done")
+}
+
+// mainLoop initiates all ports and handles the traffic
+func mainLoop() {
 	openPorts()
 	defer closePorts()
 
@@ -131,21 +103,24 @@ func main() {
 			case v := <-bodyCh:
 				if !v {
 					log.Println("BODY port is closed. Interrupting execution")
-					ch <- syscall.SIGTERM
+					exitCh <- syscall.SIGTERM
+					break
 				} else {
 					total++
 				}
 			case v := <-respCh:
 				if !v {
 					log.Println("RESP port is closed. Interrupting execution")
-					ch <- syscall.SIGTERM
+					exitCh <- syscall.SIGTERM
+					break
 				} else {
 					total++
 				}
 			case v := <-errCh:
 				if !v {
 					log.Println("ERR port is closed. Interrupting execution")
-					ch <- syscall.SIGTERM
+					exitCh <- syscall.SIGTERM
+					break
 				} else {
 					total++
 				}
@@ -163,7 +138,8 @@ func main() {
 		waitCh = nil
 	case <-time.Tick(30 * time.Second):
 		log.Println("Timeout: port connections were not established within provided interval")
-		os.Exit(1)
+		exitCh <- syscall.SIGTERM
+		return
 	}
 
 	// This is obviously dangerous but we need it to deal with our custom CA's
@@ -188,7 +164,7 @@ func main() {
 			select {
 			case <-reqExitCh:
 				log.Println("REQ port is closed. Interrupting execution")
-				ch <- syscall.SIGTERM
+				exitCh <- syscall.SIGTERM
 				break
 			default:
 				// IN port is still open
@@ -264,7 +240,7 @@ func main() {
 		select {
 		case <-reqCh:
 			log.Println("REQ port is closed. Interrupting execution")
-			ch <- syscall.SIGTERM
+			exitCh <- syscall.SIGTERM
 			break
 		default:
 			// file port is still open
@@ -273,4 +249,51 @@ func main() {
 		clientOptions = nil
 		continue
 	}
+}
+
+// validateArgs checks all required flags
+func validateArgs() {
+	if *requestEndpoint == "" {
+		flag.Usage()
+		os.Exit(1)
+	}
+	if *responseEndpoint == "" && *bodyEndpoint == "" {
+		flag.Usage()
+		os.Exit(1)
+	}
+}
+
+// openPorts create ZMQ sockets and start socket monitoring loops
+func openPorts() {
+	reqPort, err = utils.CreateInputPort("http/client.req", *requestEndpoint, reqCh)
+	utils.AssertError(err)
+
+	if *responseEndpoint != "" {
+		respPort, err = utils.CreateOutputPort("http/client.resp", *responseEndpoint, respCh)
+		utils.AssertError(err)
+	}
+	if *bodyEndpoint != "" {
+		bodyPort, err = utils.CreateOutputPort("http/client.body", *bodyEndpoint, bodyCh)
+		utils.AssertError(err)
+	}
+	if *errorEndpoint != "" {
+		errPort, err = utils.CreateOutputPort("http/client.err", *errorEndpoint, errCh)
+		utils.AssertError(err)
+	}
+}
+
+// closePorts closes all active ports and terminates ZMQ context
+func closePorts() {
+	log.Println("Closing ports...")
+	reqPort.Close()
+	if bodyPort != nil {
+		bodyPort.Close()
+	}
+	if respPort != nil {
+		respPort.Close()
+	}
+	if errPort != nil {
+		errPort.Close()
+	}
+	zmq.Term()
 }
